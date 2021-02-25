@@ -9,6 +9,7 @@ px4_add_board(
 	ROMFSROOT px4fmu_common
 	TESTING
 	UAVCAN_INTERFACES 2
+	ETHERNET
 	SERIAL_PORTS
 		GPS1:/dev/ttyS6
 		TEL1:/dev/ttyS0
@@ -44,7 +45,6 @@ px4_add_board(
 		pwm_out
 		rc_input
 		roboclaw
-		tap_esc
 		telemetry # all available telemetry drivers
 		test_ppm
 		#tone_alarm

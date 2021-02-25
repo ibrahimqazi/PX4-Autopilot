@@ -1476,6 +1476,9 @@ Mavlink::update_radio_status(const radio_status_s &radio_status)
 			/* this indicates spare bandwidth, increase by 2.5% */
 			_radio_status_mult *= 1.025f;
 		}
+
+		/* Constrain radio status multiplier between 1% and 100% to allow recovery */
+		_radio_status_mult = math::constrain(_radio_status_mult, 0.01f, 1.0f);
 	}
 }
 
@@ -1519,6 +1522,7 @@ Mavlink::configure_streams_to_default(const char *configure_single_stream)
 		configure_stream_local("GIMBAL_MANAGER_STATUS", 0.5f);
 		configure_stream_local("GIMBAL_DEVICE_SET_ATTITUDE", 5.0f);
 		configure_stream_local("GPS2_RAW", 1.0f);
+		configure_stream_local("GPS_GLOBAL_ORIGIN", 0.1f);
 		configure_stream_local("GPS_RAW_INT", 1.0f);
 		configure_stream_local("GPS_STATUS", 1.0f);
 		configure_stream_local("HOME_POSITION", 0.5f);
@@ -1578,6 +1582,7 @@ Mavlink::configure_streams_to_default(const char *configure_single_stream)
 		configure_stream_local("GIMBAL_DEVICE_SET_ATTITUDE", 5.0f);
 		configure_stream_local("GLOBAL_POSITION_INT", 50.0f);
 		configure_stream_local("GPS2_RAW", unlimited_rate);
+		configure_stream_local("GPS_GLOBAL_ORIGIN", 1.0f);
 		configure_stream_local("GPS_RAW_INT", unlimited_rate);
 		configure_stream_local("GPS_STATUS", 1.0f);
 		configure_stream_local("HOME_POSITION", 0.5f);
@@ -1639,6 +1644,7 @@ Mavlink::configure_streams_to_default(const char *configure_single_stream)
 		configure_stream_local("EXTENDED_SYS_STATE", 1.0f);
 		configure_stream_local("GLOBAL_POSITION_INT", 5.0f);
 		configure_stream_local("GPS2_RAW", 1.0f);
+		configure_stream_local("GPS_GLOBAL_ORIGIN", 1.0f);
 		configure_stream_local("GPS_RAW_INT", 1.0f);
 		configure_stream_local("HOME_POSITION", 0.5f);
 		configure_stream_local("NAV_CONTROLLER_OUTPUT", 1.5f);
@@ -1716,6 +1722,7 @@ Mavlink::configure_streams_to_default(const char *configure_single_stream)
 		configure_stream_local("EXTENDED_SYS_STATE", 2.0f);
 		configure_stream_local("GLOBAL_POSITION_INT", 10.0f);
 		configure_stream_local("GPS2_RAW", unlimited_rate);
+		configure_stream_local("GPS_GLOBAL_ORIGIN", 1.0f);
 		configure_stream_local("GPS_RAW_INT", unlimited_rate);
 		configure_stream_local("GPS_STATUS", 1.0f);
 		configure_stream_local("HIGHRES_IMU", 50.0f);
@@ -1806,11 +1813,10 @@ Mavlink::task_main(int argc, char *argv[])
 	int myoptind = 1;
 	const char *myoptarg = nullptr;
 #if defined(CONFIG_NET) || defined(__PX4_POSIX)
-	char *eptr;
 	int temp_int_arg;
 #endif
 
-	while ((ch = px4_getopt(argc, argv, "b:r:d:n:u:o:m:t:c:fswxzZ", &myoptind, &myoptarg)) != EOF) {
+	while ((ch = px4_getopt(argc, argv, "b:r:d:n:u:o:m:t:c:fswxzZp", &myoptind, &myoptarg)) != EOF) {
 		switch (ch) {
 		case 'b':
 			if (px4_get_parameter_value(myoptarg, _baudrate) != 0) {
@@ -1856,29 +1862,25 @@ Mavlink::task_main(int argc, char *argv[])
 #if defined(MAVLINK_UDP)
 
 		case 'u':
-			temp_int_arg = strtoul(myoptarg, &eptr, 10);
-
-			if (*eptr == '\0') {
-				_network_port = temp_int_arg;
-				set_protocol(Protocol::UDP);
+			if (px4_get_parameter_value(myoptarg, temp_int_arg) != 0) {
+				PX4_ERR("invalid data udp_port");
+				err_flag = true;
 
 			} else {
-				PX4_ERR("invalid data udp_port '%s'", myoptarg);
-				err_flag = true;
+				_network_port = temp_int_arg;
+				set_protocol(Protocol::UDP);
 			}
 
 			break;
 
 		case 'o':
-			temp_int_arg = strtoul(myoptarg, &eptr, 10);
-
-			if (*eptr == '\0') {
-				_remote_port = temp_int_arg;
-				set_protocol(Protocol::UDP);
+			if (px4_get_parameter_value(myoptarg, temp_int_arg) != 0) {
+				PX4_ERR("invalid remote udp_port");
+				err_flag = true;
 
 			} else {
-				PX4_ERR("invalid remote udp_port '%s'", myoptarg);
-				err_flag = true;
+				_remote_port = temp_int_arg;
+				set_protocol(Protocol::UDP);
 			}
 
 			break;
@@ -1896,6 +1898,10 @@ Mavlink::task_main(int argc, char *argv[])
 
 			break;
 
+		case 'p':
+			_mav_broadcast = BROADCAST_MODE_ON;
+			break;
+
 #if defined(CONFIG_NET_IGMP) && defined(CONFIG_NET_ROUTE)
 
 		// multicast
@@ -1904,6 +1910,7 @@ Mavlink::task_main(int argc, char *argv[])
 
 			if (inet_aton(myoptarg, &_src_addr.sin_addr)) {
 				_src_addr_initialized = true;
+				_mav_broadcast = BROADCAST_MODE_MULTICAST;
 
 			} else {
 				PX4_ERR("invalid partner ip '%s'", myoptarg);
@@ -1920,6 +1927,7 @@ Mavlink::task_main(int argc, char *argv[])
 #endif
 #else
 
+		case 'p':
 		case 'u':
 		case 'o':
 		case 't':
@@ -2203,7 +2211,7 @@ Mavlink::task_main(int argc, char *argv[])
 
 #if defined(CONFIG_NET)
 
-			if (_param_mav_broadcast.get() != BROADCAST_MODE_MULTICAST) {
+			if (!multicast_enabled()) {
 				_src_addr_initialized = false;
 			}
 
@@ -2764,6 +2772,12 @@ Mavlink::display_status()
 
 	case Protocol::UDP:
 		printf("UDP (%i, remote port: %i)\n", _network_port, _remote_port);
+		printf("\tBroadcast enabled: %s\n",
+		       broadcast_enabled() ? "YES" : "NO");
+#if defined(CONFIG_NET_IGMP) && defined(CONFIG_NET_ROUTE)
+		printf("\tMulticast enabled: %s\n",
+		       multicast_enabled() ? "YES" : "NO");
+#endif
 #ifdef __PX4_POSIX
 
 		if (get_client_source_initialized()) {
@@ -2830,7 +2844,6 @@ Mavlink::stream_command(int argc, char *argv[])
 	float rate = -1.0f;
 	const char *stream_name = nullptr;
 #ifdef MAVLINK_UDP
-	char *eptr;
 	int temp_int_arg;
 	unsigned short network_port = 0;
 #endif // MAVLINK_UDP
@@ -2876,13 +2889,12 @@ Mavlink::stream_command(int argc, char *argv[])
 
 		} else if (0 == strcmp(argv[i], "-u") && i < argc - 1) {
 			provided_network_port = true;
-			temp_int_arg = strtoul(argv[i + 1], &eptr, 10);
 
-			if (*eptr == '\0') {
-				network_port = temp_int_arg;
+			if (px4_get_parameter_value(argv[i + 1], temp_int_arg) != 0) {
+				err_flag = true;
 
 			} else {
-				err_flag = true;
+				network_port = temp_int_arg;
 			}
 
 			i++;
@@ -2960,7 +2972,7 @@ Mavlink::set_boot_complete()
 		if (inst && (inst->get_mode() != MAVLINK_MODE_ONBOARD) &&
 		    !inst->broadcast_enabled() && inst->get_protocol() == Protocol::UDP) {
 
-			PX4_INFO("MAVLink only on localhost (set param MAV_BROADCAST = 1 to enable network)");
+			PX4_INFO("MAVLink only on localhost (set param MAV_{i}_BROADCAST = 1 to enable network)");
 		}
 	}
 
@@ -3007,16 +3019,17 @@ $ mavlink stream -u 14556 -s HIGHRES_IMU -r 50
 	PRINT_MODULE_USAGE_PARAM_INT('b', 57600, 9600, 3000000, "Baudrate (can also be p:<param_name>)", true);
 	PRINT_MODULE_USAGE_PARAM_INT('r', 0, 10, 10000000, "Maximum sending data rate in B/s (if 0, use baudrate / 20)", true);
 #if defined(CONFIG_NET) || defined(__PX4_POSIX)
+	PRINT_MODULE_USAGE_PARAM_FLAG('p', "Enable Broadcast", true);
 	PRINT_MODULE_USAGE_PARAM_INT('u', 14556, 0, 65536, "Select UDP Network Port (local)", true);
 	PRINT_MODULE_USAGE_PARAM_INT('o', 14550, 0, 65536, "Select UDP Network Port (remote)", true);
 	PRINT_MODULE_USAGE_PARAM_STRING('t', "127.0.0.1", nullptr,
-					"Partner IP (broadcasting can be enabled via MAV_BROADCAST param)", true);
+					"Partner IP (broadcasting can be enabled via MAV_{i}_BROADCAST param)", true);
 #endif
 	PRINT_MODULE_USAGE_PARAM_STRING('m', "normal", "custom|camera|onboard|osd|magic|config|iridium|minimal|extvision|extvisionmin|gimbal",
 					"Mode: sets default streams and rates", true);
 	PRINT_MODULE_USAGE_PARAM_STRING('n', nullptr, "<interface_name>", "wifi/ethernet interface name", true);
 #if defined(CONFIG_NET_IGMP) && defined(CONFIG_NET_ROUTE)
-	PRINT_MODULE_USAGE_PARAM_STRING('c', nullptr, "Multicast address in the range [239.0.0.0,239.255.255.255]", "Multicast address (multicasting can be enabled via MAV_BROADCAST param)", true);
+	PRINT_MODULE_USAGE_PARAM_STRING('c', nullptr, "Multicast address in the range [239.0.0.0,239.255.255.255]", "Multicast address (multicasting can be enabled via MAV_{i}_BROADCAST param)", true);
 #endif
 	PRINT_MODULE_USAGE_PARAM_FLAG('f', "Enable message forwarding to other Mavlink instances", true);
 	PRINT_MODULE_USAGE_PARAM_FLAG('w', "Wait to send, until first message received", true);
